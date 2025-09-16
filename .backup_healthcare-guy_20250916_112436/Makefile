@@ -35,9 +35,3 @@ lint:
 	uv run ruff check . --diff
 	uv run ruff format . --check --diff
 	uv run mypy .
-
-# --- Commands from Agent Starter Pack ---
-
-local-backend:
-	uv run uvicorn app.server:app --host 0.0.0.0 --port 8000 --reload
-
