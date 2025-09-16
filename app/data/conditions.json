@@ -1,0 +1,105 @@
+[
+  {
+    "condition": "Common Cold",
+    "aliases": ["cold", "viral upper respiratory infection", "uri"],
+    "symptoms": ["runny nose", "stuffy nose", "sore throat", "cough", "sneezing", "low-grade fever", "fatigue"],
+    "self_care": [
+      "Rest and stay hydrated",
+      "Use saline nasal spray or steam inhalation",
+      "Consider acetaminophen or ibuprofen for fever/aches (follow label)",
+      "Warm salt-water gargles for sore throat"
+    ],
+    "watchouts": [
+      "Fever over 39.4°C (103°F)",
+      "Shortness of breath or chest pain",
+      "Symptoms lasting >10 days without improvement"
+    ]
+  },
+  {
+    "condition": "Seasonal Allergies (Allergic Rhinitis)",
+    "aliases": ["hay fever", "allergies"],
+    "symptoms": ["sneezing", "itchy eyes", "watery eyes", "runny nose", "stuffy nose", "post-nasal drip"],
+    "self_care": [
+      "Limit exposure to triggers; keep windows closed on high-pollen days",
+      "Rinse nasal passages with saline",
+      "Over-the-counter antihistamines may help (follow label)"
+    ],
+    "watchouts": [
+      "Wheezing, shortness of breath, or chest tightness",
+      "Facial pain with fever (could suggest sinus infection)"
+    ]
+  },
+  {
+    "condition": "Influenza (Flu)",
+    "aliases": ["flu", "influenza"],
+    "symptoms": ["fever", "chills", "muscle aches", "headache", "dry cough", "fatigue", "sore throat"],
+    "self_care": [
+      "Rest, fluids, and fever reducers (follow label)",
+      "Stay home until fever-free for 24 hours without medication"
+    ],
+    "watchouts": [
+      "Difficulty breathing or chest pain",
+      "Confusion, severe weakness, or persistent high fever",
+      "High risk groups (pregnancy, elderly, chronic conditions) should contact a clinician early"
+    ]
+  },
+  {
+    "condition": "Gastroenteritis (Stomach Bug)",
+    "aliases": ["stomach flu", "food poisoning"],
+    "symptoms": ["nausea", "vomiting", "diarrhea", "abdominal cramps", "low-grade fever"],
+    "self_care": [
+      "Small sips of oral rehydration solution; avoid dehydration",
+      "BRAT-style foods (bananas, rice, applesauce, toast) as tolerated",
+      "Avoid dairy, alcohol, and greasy foods until recovered"
+    ],
+    "watchouts": [
+      "Blood in vomit or stool",
+      "Signs of dehydration (very dry mouth, dizziness, minimal urination)",
+      "Severe abdominal pain or fever > 38.9°C (102°F)"
+    ]
+  },
+  {
+    "condition": "Tension Headache",
+    "aliases": ["headache"],
+    "symptoms": ["headache", "pressure around head", "neck tightness", "no nausea"],
+    "self_care": [
+      "Hydration, rest, gentle neck stretches",
+      "Consider over-the-counter pain relievers (follow label)",
+      "Reduce screen time and manage stress"
+    ],
+    "watchouts": [
+      "Sudden 'worst headache' of life",
+      "Headache with confusion, fainting, stiff neck, or fever",
+      "Headache after head injury"
+    ]
+  },
+  {
+    "condition": "Migraine",
+    "aliases": ["migraine"],
+    "symptoms": ["throbbing headache", "nausea", "vomiting", "sensitivity to light", "sensitivity to sound", "aura"],
+    "self_care": [
+      "Rest in a dark, quiet room",
+      "Hydrate; consider OTC migraine remedies if suitable (follow label)"
+    ],
+    "watchouts": [
+      "New or severe neurological symptoms (weakness, speech trouble, vision loss)",
+      "Worst headache of life or abrupt onset",
+      "Fever with stiff neck"
+    ]
+  },
+  {
+    "condition": "Contact Dermatitis (Skin Rash)",
+    "aliases": ["rash", "dermatitis"],
+    "symptoms": ["itchy rash", "redness", "dry patches", "localized swelling"],
+    "self_care": [
+      "Wash area; avoid suspected irritant",
+      "Cool compresses; fragrance-free moisturizer",
+      "OTC hydrocortisone cream for itch (follow label)"
+    ],
+    "watchouts": [
+      "Rash with fever or rapidly spreading redness",
+      "Painful swelling or pus (infection signs)",
+      "Signs of anaphylaxis (trouble breathing, swelling of lips/tongue)"
+    ]
+  }
+]

@@ -15,9 +15,24 @@
 import datetime
 import os
 from zoneinfo import ZoneInfo
+from .triage import triage_pipeline
 
 import google.auth
 from google.adk.agents import Agent
+from .assistant_tools import (
+    set_user_location,
+    find_nearby_healthcare,
+    estimate_cost,
+    book_appointment,
+)
+# Make auth robust: don't crash if ADC isn't set up yet
+try:
+    _, project_id = google.auth.default()
+    if project_id:
+        os.environ.setdefault("GOOGLE_CLOUD_PROJECT", project_id)
+except Exception:
+    pass
+
 
 _, project_id = google.auth.default()
 os.environ.setdefault("GOOGLE_CLOUD_PROJECT", project_id)
@@ -25,42 +40,45 @@ os.environ.setdefault("GOOGLE_CLOUD_LOCATION", "global")
 os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "True")
 
 
-def get_weather(query: str) -> str:
-    """Simulates a web search. Use it get information on weather.
-
-    Args:
-        query: A string containing the location to get weather information for.
-
-    Returns:
-        A string with the simulated weather information for the queried location.
-    """
-    if "sf" in query.lower() or "san francisco" in query.lower():
-        return "It's 60 degrees and foggy."
-    return "It's 90 degrees and sunny."
-
-
-def get_current_time(query: str) -> str:
-    """Simulates getting the current time for a city.
-
-    Args:
-        city: The name of the city to get the current time for.
-
-    Returns:
-        A string with the current time information.
-    """
-    if "sf" in query.lower() or "san francisco" in query.lower():
-        tz_identifier = "America/Los_Angeles"
-    else:
-        return f"Sorry, I don't have timezone information for query: {query}."
-
-    tz = ZoneInfo(tz_identifier)
-    now = datetime.datetime.now(tz)
-    return f"The current time for query {query} is {now.strftime('%Y-%m-%d %H:%M:%S %Z%z')}"
-
+TRIAGE_SYSTEM_PROMPT = (
+    "You are a cautious, friendly **virtual healthcare triage assistant**.\n\n"
+    "CONVERSATION FLOW:\n"
+    "• If the user greets (hi/hello/hey) or it's the first turn: "
+    "  - Greet warmly and briefly explain what you can do.\n"
+    "  - Present a short options menu:\n"
+    "    1) Help me narrow down my symptoms\n"
+    "    2) Book an appointment\n"
+    "    3) Find nearby healthcare centers\n"
+    "  - Before proceeding, politely ask: “What city/area are you located in?”\n"
+    "  - When the user provides a location, call the tool `set_user_location(location)` "
+    "    and then call `find_nearby_healthcare(location)` to surface 2–3 nearby options.\n\n"
+    "• If the user chooses **narrow down my symptoms**:\n"
+    "  - Ask targeted questions to gather: age group, main symptoms, duration, and severity.\n"
+    "  - Use plain English and keep it concise; a single follow-up at a time.\n"
+    "  - After collecting enough detail, call the tool `triage_pipeline(full_user_description)` "
+    "    and present the structured advice it returns.\n"
+    "  - Then ask: “Do you have medical insurance?”\n"
+    "    - If yes/no, call `estimate_cost(has_insurance, suspected_condition_or_main_symptoms)` and "
+    "      show a friendly snapshot of typical costs and a suggested venue (clinic vs urgent care).\n\n"
+    "• If the user chooses **book an appointment**:\n"
+    "  - Ask which clinic (they can pick from the nearby list), date/time (ISO recommended), and reason.\n"
+    "  - Then call `book_appointment(clinic_name, datetime_iso, reason)` and show the confirmation.\n\n"
+    "SAFETY & STYLE:\n"
+    "• NEVER diagnose or prescribe. Hedge language: 'might be', 'could be'.\n"
+    "• If emergencies are described, the `triage_pipeline` tool will return an emergency message — "
+    "  send it verbatim and stop.\n"
+    "• Keep answers short, bulleted where useful, and always include a brief disclaimer at the end.\n"
+)
 
 root_agent = Agent(
-    name="root_agent",
+    name="triage_agent",
     model="gemini-2.5-flash",
-    instruction="You are a helpful AI assistant designed to provide accurate and useful information.",
-    tools=[get_weather, get_current_time],
+    instruction=TRIAGE_SYSTEM_PROMPT,
+    tools=[
+        set_user_location,
+        find_nearby_healthcare,
+        triage_pipeline,
+        estimate_cost,
+        book_appointment,
+    ],
 )
