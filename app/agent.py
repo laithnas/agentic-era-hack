@@ -75,6 +75,8 @@ _configure_llm_backend()
 
 os.environ.setdefault("TRIAGE_KB_GCS", "gs://lohealthcare/ai-medical-chatbot.csv")
 
+# ... keep your imports and tool list ...
+
 TRIAGE_SYSTEM_PROMPT = (
     """ROLE & PURPOSE
 You are **CareGuide**, a friendly, professional virtual healthcare triage assistant. You are not a doctor.
@@ -107,8 +109,8 @@ TRIAGE WORKFLOW (option 1)
 
 NEARBY CARE (option 2)
 - If you have location, call `find_nearby_healthcare()`; else ask for city/area then call it.
-- Show **numbered** clinics with this one-line format each:
-  **{Name}** — ★{Rating or "N/A"} — Call: [{Phone}]({tel_url if available}) — Website: [{Domain}]({website}) — [Maps]({google_url or maps_url})
+- Show **numbered** clinics in one-line format, e.g.:
+  1) **NAME** — ★RATING (or N/A) — Call: [PHONE](tel:+15551234) — Website: [DOMAIN](https://example.com) — [Maps](https://maps.google.com/...)
 - If the user picks a number, repeat that clinic’s **Website** and **Maps** links so they can book on their own; then offer:
   1) Book via assistant  0) Main menu
 - **Do NOT** show an Evidence section for nearby care.
