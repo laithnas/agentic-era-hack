@@ -1,137 +1,144 @@
 import json, re
 from pathlib import Path
+from typing import List, Dict, Any
 
 DATA_PATH = Path(__file__).parent / "data" / "conditions.json"
+SYMPTOM_KB_PATH = Path(__file__).parent / "data" / "kb_symptom_to_conditions.json"
 
+# Only VERY serious triggers
 EMERGENCY_PATTERNS = [
     r"\bchest pain\b",
-    r"\bdifficulty (breathing|inhaling)\b|\bshort(ness)? of breath\b",
-    r"\bsevere bleeding\b|\bheavy bleeding\b",
-    r"\bpassed out\b|\bfainted\b|\bloss of consciousness\b",
-    r"\bstroke symptoms\b|\bface droop\b|\bslurred speech\b|\bweakness on (one|1) side\b",
-    r"\bstiff neck\b.*\bfever\b",
-    r"\b(vision loss|double vision)\b.*\bheadache\b",
-]
-
-CHRONIC_PATTERNS = [
-    r"\bfor (\d+|several|many) (days|weeks|months|years)\b",
-    r"\b(chronic|ongoing|persistent)\b",
-    r"\b(diabetes|cancer|copd|asthma flare|heart failure)\b",
+    r"\b(shortness of breath|severe trouble breathing)\b",
+    r"\bsevere bleeding\b",
+    r"\b(passed out|fainted|loss of consciousness)\b",
+    r"\b(stroke symptoms|face droop|slurred speech|weakness on (one|1) side)\b",
 ]
 
 SYMPTOM_TERMS = [
-    "fever","high fever","low-grade fever","chills","sore throat","cough","dry cough","runny nose","stuffy nose",
-    "sneezing","itchy eyes","watery eyes","post-nasal drip","headache","throbbing headache","nausea","vomiting",
-    "diarrhea","abdominal cramps","fatigue","pressure around head","neck tightness","aura","rash","itchy rash","redness",
-    "dry patches","swelling","shortness of breath","chest pain","wheezing","photophobia","phonophobia"
+    "fever","cough","sore throat","runny nose","stuffy nose","sneezing","headache","nausea","vomiting",
+    "diarrhea","abdominal cramps","fatigue","rash","itchy rash","shortness of breath","wheezing","chest pain",
+    "dry mouth","xerostomia","thirst","sticky saliva","bad breath","difficulty swallowing","cracked lips"
 ]
 
-def _normalize(text: str) -> str:
-    import re
-    return re.sub(r"\s+", " ", text.strip().lower())
+def _norm(s:str)->str:
+    return re.sub(r"\s+"," ",s.strip().lower())
+
+def _disclaimer_block() -> str:
+    # Exact structure: line, blank line, then "Disclaimer: ..."
+    return "This is general guidance, not a medical diagnosis.\n\nDisclaimer: This is general guidance, not a medical diagnosis."
 
 def red_flag_checker(text: str) -> str:
-    t = _normalize(text)
+    t=_norm(text)
     for pat in EMERGENCY_PATTERNS:
         if re.search(pat, t):
-            return ("⚠️ This could be a medical emergency. Please seek **immediate** medical attention "
-                    "or call your local emergency number now.")
-    return ""
-
-def chronic_checker(text: str) -> str:
-    t = _normalize(text)
-    for pat in CHRONIC_PATTERNS:
-        if re.search(pat, t):
-            return ("This sounds like a chronic or complex issue. I recommend connecting with a **live clinician** "
-                    "for proper evaluation. I can hand you off now if you'd like.")
+            msg = ("⚠️ This could be a medical emergency. Please seek **immediate** medical attention "
+                   "or call your local emergency number now.")
+            return f"{msg}\n\n{_disclaimer_block()}"
     return ""
 
 def symptom_extract(text: str) -> dict:
-    t = _normalize(text)
-    found = [s for s in SYMPTOM_TERMS if s in t]
-    # duration
-    m = re.search(r"(for|since) ([\w\s]+?)(?:\.|,|;|$)", t)
+    t=_norm(text)
+    found=[s for s in SYMPTOM_TERMS if s in t]
+    m=re.search(r"(for|since) ([\w\s\-]+?)(?:\.|,|;|$)", t)
     duration = m.group(2).strip() if m else ""
-    # severity
-    severity = "moderate"
-    if re.search(r"\b(mild|slight)\b", t): severity = "mild"
-    if re.search(r"\b(severe|intense|worst)\b", t): severity = "severe"
-    return {"symptoms": sorted(set(found)), "duration": duration, "severity": severity}
+    severity="moderate"
+    if re.search(r"\b(mild|slight)\b", t): severity="mild"
+    if re.search(r"\b(severe|intense|worst)\b", t): severity="severe"
+    return {"symptoms":sorted(set(found)),"duration":duration,"severity":severity}
 
 def _load_conditions():
-    with open(DATA_PATH, "r") as f:
-        return json.load(f)
+    return json.loads(DATA_PATH.read_text()) if DATA_PATH.exists() else []
 
-def _score(symptoms:list[str], candidate:dict) -> float:
-    a = set(symptoms)
-    b = set([s.lower() for s in candidate.get("symptoms", [])])
-    if not a or not b: return 0.0
-    return len(a & b) / len(a | b)
+def _load_sym_kb():
+    if SYMPTOM_KB_PATH.exists():
+        return json.loads(SYMPTOM_KB_PATH.read_text())
+    return {}
 
-def rules_lookup(symptoms: list[str], duration: str="", severity: str="") -> dict:
-    db = _load_conditions()
-    scored = sorted(
-        [{"item": c, "score": _score(symptoms, c)} for c in db],
-        key=lambda x: x["score"],
-        reverse=True,
-    )
-    top = [s for s in scored if s["score"] >= 0.15][:2]
-    results = []
-    for s in top:
-        c = s["item"]
-        results.append({
-            "condition": c["condition"],
-            "score": round(s["score"], 2),
-            "self_care": c.get("self_care", []),
-            "watchouts": c.get("watchouts", [])
-        })
-    return {"matches": results, "duration": duration, "severity": severity}
+def _score(symptoms:list[str], c:dict)->float:
+    a=set(symptoms); b=set([s.lower() for s in c.get("symptoms",[])])
+    return 0.0 if not a or not b else len(a & b)/len(a | b)
 
-def advice_renderer(analysis: dict, user_text: str) -> str:
-    matches = analysis.get("matches", [])
-    duration = analysis.get("duration","")
-    severity = analysis.get("severity","")
-    lines = []
-    lines.append("Thanks for the details. Here’s a quick, cautious triage summary:")
-    if matches:
-        maybe = ", ".join([m["condition"] for m in matches])
-        lines.append(f"**What it might be:** {maybe} (not a diagnosis).")
-    else:
-        lines.append("**What it might be:** I can't tell yet from the description.")
-    steps = []
-    for m in matches:
-        for s in m["self_care"]:
-            if s not in steps: steps.append(s)
-    if steps:
-        lines.append("**What you can do now:**")
-        for s in steps[:6]:
-            lines.append(f"- {s}")
-    watch = []
-    for m in matches:
-        for w in m["watchouts"]:
-            if w not in watch: watch.append(w)
-    if watch:
-        lines.append("**Watch for these:**")
-        for w in watch[:6]:
-            lines.append(f"- {w}")
+def rules_lookup(symptoms:list[str], duration:str="", severity:str="")->dict:
+    db=_load_conditions()
+    scored=sorted([{"item":c,"score":_score(symptoms,c)} for c in db], key=lambda x:x["score"], reverse=True)
+    top=[s for s in scored if s["score"]>=0.15][:3]  # up to 3
+    results=[{
+        "condition": s["item"]["condition"],
+        "score": round(s["score"],2),
+        "self_care": s["item"].get("self_care",[]),
+        "watchouts": s["item"].get("watchouts",[])
+    } for s in top]
+    return {"matches":results,"duration":duration,"severity":severity}
+
+def kb_lookup(symptoms: List[str]) -> List[str]:
+    kb=_load_sym_kb(); out=[]
+    joined=" ".join(symptoms)
+    for k,vals in kb.items():
+        if k in joined and vals:
+            for v in vals:
+                if v not in out:
+                    out.append(v)
+    return out[:5]
+
+def advice_renderer(analysis:dict)->str:
+    m=analysis.get("matches",[])
+    duration=analysis.get("duration",""); severity=analysis.get("severity","")
+    lines=["**Triage summary (not a diagnosis)**"]
+    lines.append(f"- What it might be: {', '.join([x['condition'] for x in m]) if m else 'We need a bit more detail to narrow this.'}")
+    if m:
+        steps=[]; warns=[]
+        for mm in m:
+            for s in mm.get("self_care",[]):
+                if s not in steps: steps.append(s)
+            for w in mm.get("watchouts",[]):
+                if w not in warns: warns.append(w)
+        if steps:
+            lines.append("- What you can do now:")
+            for s in steps[:6]:
+                lines.append(f"  • {s}")
+        if warns:
+            lines.append("- Watch for:")
+            for w in warns[:6]:
+                lines.append(f"  • {w}")
     if duration:
-        lines.append(f"_You mentioned this has been going on for **{duration}**; if it persists or worsens, seek care._")
-    if severity == "severe":
-        lines.append("_Given you described **severe** symptoms, consider contacting a clinician sooner._")
-    lines.append("\n> _I’m a virtual assistant, not a medical professional. For emergencies or worsening symptoms, seek medical care._")
+        lines.append(f"- Duration noted: **{duration}** (seek care if it persists or worsens)")
+    if severity=="severe":
+        lines.append("- Severity noted: **severe** — consider contacting a clinician sooner")
+
+    # Two-line disclaimer (exact structure)
+    lines.append(_disclaimer_block())
     return "\n".join(lines)
 
 def triage_pipeline(user_text: str) -> str:
+    """
+    Primary entry point called by the agent.
+    - If very serious red flags present -> emergency message (with disclaimer).
+    - Else: produce up to 3 plausible conditions (hedged) using rules + KB; render self-care and watch-outs.
+    """
+    # Emergency short-circuit
     em = red_flag_checker(user_text)
-    if em: return em
-    ch = chronic_checker(user_text)
-    if ch: return ch
+    if em:
+        return em  # already includes disclaimer block
+
+    # Extract
     info = symptom_extract(user_text)
-    analysis = rules_lookup(
-        info.get("symptoms", []),
-        info.get("duration",""),
-        info.get("severity","")
-    )
-    return advice_renderer(analysis, user_text)
 
+    # Rules (from conditions.json)
+    analysis = rules_lookup(info.get("symptoms", []), info.get("duration",""), info.get("severity",""))
 
+    # If rules are sparse, backfill from KB to ensure we suggest at least some plausible conditions
+    current = [m["condition"] for m in analysis.get("matches",[])]
+    if len(current) < 3:
+        kb_suggestions = [c for c in kb_lookup(info.get("symptoms", [])) if c not in current]
+        for c in kb_suggestions:
+            analysis.setdefault("matches", []).append({
+                "condition": c,
+                "score": 0.2,              # neutral placeholder score for KB matches
+                "self_care": [],
+                "watchouts": []
+            })
+            if len(analysis["matches"]) >= 3:
+                break
+
+    # Final render (includes the required disclaimers)
+    return advice_renderer(analysis)

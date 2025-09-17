@@ -13,5 +13,12 @@
 # limitations under the License.
 
 from .agent import root_agent
+from fastapi import FastAPI
+from .voice import router as voice_router
 
 __all__ = ["root_agent"]
+
+
+app = FastAPI()
+app.include_router(voice_router)
+
