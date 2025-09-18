@@ -9,9 +9,6 @@ CareGuide is an **AI-powered medical assistant** that helps users triage symptom
 
 ---
 
-## Project Structure
-
-
 
 ## Project Structure
 
