@@ -205,7 +205,7 @@ def get_saved_location() -> dict:
     return {"status": "ok", **_LAST_LOCATION}
 
 
-def clear_location() -> dict:
+def clear_user_location() -> dict:
     """Clear any saved location for a fresh session/start."""
     _LAST_LOCATION.update({
         "input": "",
