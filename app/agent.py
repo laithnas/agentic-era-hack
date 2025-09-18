@@ -19,6 +19,10 @@ from typing import Optional
 
 # --- Core triage logic ---
 from .triage import triage_pipeline
+from .safety_guard import set_safety_level, get_safety_level, safety_gate
+from .triage_kb_admin import kb_reload, set_profile, get_profile
+from .handoff import set_handoff_destination, request_live_handoff
+
 
 # --- Assistant tools (maps, costs, booking, RAG, evidence, meds, what-if, timeline, visit-prep) ---
 from .assistant_tools import (
@@ -38,6 +42,13 @@ from .assistant_tools import (
     visit_prep_summary,
     clear_user_location,
 )
+from .social_tone import set_care_mode, get_care_mode, sentiment_screen, tone_enforce
+from .prescription_parser import extract_meds_from_text
+from .risk_sim import risk_simulate
+from .timeline_ai import timeline_insights
+from .i18n import set_language, get_language, phrase
+from .evidence_render import evidence_markdown
+from .lab_ocr import analyze_lab_text
 
 # --- Conversation extras (routing, adaptive triage, evidence toggle, clinic formatting, interactions, ICS/handoff, tone) ---
 from .conversation_extras import (
@@ -245,10 +256,29 @@ root_agent = Agent(
         triage_session_step,
         set_evidence_visible,
         get_evidence_visible,
-
         # Optional formatting helpers (available to the model if it wants)
         tone_numbered,
         haversine_km,
         format_place_line,
+        set_care_mode, 
+        get_care_mode, 
+        sentiment_screen, 
+        tone_enforce,
+        set_safety_level, 
+        get_safety_level, 
+        safety_gate,
+        kb_reload, 
+        set_profile, 
+        get_profile,
+        set_handoff_destination, 
+        request_live_handoff,
+        extract_meds_from_text,
+        risk_simulate,
+        timeline_insights,
+        set_language, 
+        get_language, 
+        phrase,
+        evidence_markdown,
+        analyze_lab_text,
     ],
 )
