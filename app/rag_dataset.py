@@ -1,94 +1,111 @@
-import os, re, io
-import numpy as np
-import pandas as pd
-from typing import List, Dict, Any, Optional
+# app/rag_dataset.py
+from __future__ import annotations
+import os, io, csv, time
+from typing import List, Dict, Any, Tuple
+from dataclasses import dataclass
+from .config import TRIAGE_KB_GCS, TRIAGE_KB_LOCAL
+from .evidence import EVIDENCE
 
-_MAX_ROWS = int(os.getenv("RAG_MAX_ROWS", "120000"))
-_MAX_FEATURES = int(os.getenv("RAG_MAX_FEATURES", "120000"))
-_GCS_URI = os.getenv("TRIAGE_KB_GCS", "gs://lohealthcare/ai-medical-chatbot.csv")
+# Lazy imports (avoid heavy deps on import time)
+def _np():  # numpy
+    import numpy as np
+    return np
 
-_DF: Optional[pd.DataFrame] = None
-_VEC = None
-_MAT = None
-_READY = False
-_SOURCE = "unknown"
-
-def _gcs_download_text(gcs_uri: str) -> str:
-    if not gcs_uri.startswith("gs://"):
-        raise ValueError("TRIAGE_KB_GCS must be a gs:// URI")
-    from google.cloud import storage
-    bucket_name, key = gcs_uri.replace("gs://","").split("/", 1)
-    client = storage.Client(project=os.getenv("GOOGLE_CLOUD_PROJECT"))
-    blob = client.bucket(bucket_name).blob(key)
-    return blob.download_as_text()
-
-def _load_df() -> pd.DataFrame:
-    global _SOURCE  # <-- declare once at top
-    try:
-        csv_text = _gcs_download_text(_GCS_URI)
-        df = pd.read_csv(io.StringIO(csv_text))
-        _SOURCE = _GCS_URI
-        return df
-    except Exception:
-        local = "/mnt/data/ai-medical-chatbot.csv"
-        df = pd.read_csv(local)
-        _SOURCE = local
-        return df
-
-def _clean_text(s: str) -> str:
-    s = re.sub(r"\s+"," ", (s or "")).strip()
-    s = re.sub(r"^\s*(q\.|Q\.)\s*", "", s)
-    return s
-
-def _build_index():
-    global _DF, _VEC, _MAT, _READY
+def _sk_text():
     from sklearn.feature_extraction.text import TfidfVectorizer
+    return TfidfVectorizer
 
-    df = _load_df()
-    cols = ["Description","Patient","Doctor"]
-    df = df[cols].dropna().copy()
-    df["text"] = (df["Patient"].map(_clean_text) + " " + df["Description"].map(_clean_text)).str.lower()
+def _sk_metrics():
+    from sklearn.metrics.pairwise import cosine_similarity
+    return cosine_similarity
 
-    if len(df) > _MAX_ROWS:
-        df = df.sample(_MAX_ROWS, random_state=42).reset_index(drop=True)
+def _download_gcs_to_local(gcs_uri: str, local_path: str) -> bool:
+    """Best-effort download; if GCS libs aren’t available, skip."""
+    try:
+        from google.cloud import storage
+        if not gcs_uri.startswith("gs://"):
+            return False
+        bucket_name, blob_path = gcs_uri[5:].split("/", 1)
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        blob.download_to_filename(local_path)
+        return True
+    except Exception:
+        return False
 
-    _VEC = TfidfVectorizer(
-        max_features=_MAX_FEATURES,
-        ngram_range=(1,2),
-        min_df=2,
-        stop_words="english"
-    )
-    _MAT = _VEC.fit_transform(df["text"].tolist())
-    _DF = df.reset_index(drop=True)
-    _READY = True
+@dataclass
+class KBRow:
+    condition: str
+    symptoms: str
+    advice: str
+    url: str|None = None
 
-def _ensure_ready():
-    if not _READY:
-        _build_index()
+_Vectorizer = None
+_MATRIX = None
+_ROWS: List[KBRow] = []
 
-def rag_search(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-    _ensure_ready()
-    q = _VEC.transform([query.lower()])
-    sims = (q @ _MAT.T).toarray().ravel()
-    if sims.size == 0:
+def _ensure_local_csv() -> str:
+    if os.path.exists(TRIAGE_KB_LOCAL):
+        return TRIAGE_KB_LOCAL
+    ok = _download_gcs_to_local(TRIAGE_KB_GCS, TRIAGE_KB_LOCAL)
+    return TRIAGE_KB_LOCAL if ok and os.path.exists(TRIAGE_KB_LOCAL) else ""
+
+def _load_rows() -> List[KBRow]:
+    path = _ensure_local_csv()
+    rows: List[KBRow] = []
+    if not path:
+        return rows
+    with open(path, "r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        # Flexible columns
+        cond_col = next((c for c in reader.fieldnames or [] if c.lower() in ("condition","disease","name")), "condition")
+        sym_col = next((c for c in reader.fieldnames or [] if c.lower() in ("symptoms","symptom","features")), "symptoms")
+        adv_col = next((c for c in reader.fieldnames or [] if c.lower() in ("advice","self_care","recommendations")), "advice")
+        url_col = next((c for c in reader.fieldnames or [] if c.lower() in ("url","link","source")), None)
+        for r in reader:
+            rows.append(KBRow(
+                condition=(r.get(cond_col) or "").strip(),
+                symptoms=(r.get(sym_col) or "").strip(),
+                advice=(r.get(adv_col) or "").strip(),
+                url=(r.get(url_col) or None) if url_col else None
+            ))
+    return rows
+
+def _build_index() -> None:
+    global _Vectorizer, _MATRIX, _ROWS
+    if _Vectorizer is not None and _MATRIX is not None and _ROWS:
+        return
+    _ROWS = _load_rows()
+    if not _ROWS:
+        return
+    texts = [f"{r.condition} | {r.symptoms} | {r.advice}" for r in _ROWS]
+    TfidfVectorizer = _sk_text()
+    _Vectorizer = TfidfVectorizer(min_df=1, max_features=30000, ngram_range=(1,2))
+    _MATRIX = _Vectorizer.fit_transform(texts)
+
+def rag_stats() -> Dict[str, int]:
+    _build_index()
+    return {"rows": len(_ROWS), "indexed": int(_MATRIX.shape[0]) if _MATRIX is not None else 0}
+
+def rag_search(query: str, top_k: int = 3) -> List[Dict[str, Any]]:
+    _build_index()
+    if not _ROWS or _Vectorizer is None or _MATRIX is None:
         return []
-    k = min(top_k, sims.shape[0])
-    idx = np.argpartition(-sims, k-1)[:k]
-    idx = idx[np.argsort(-sims[idx])]
-    out: List[Dict[str, Any]] = []
+    vec = _Vectorizer.transform([query])
+    cosine_similarity = _sk_metrics()
+    sims = cosine_similarity(vec, _MATRIX)[0]
+    idx = sims.argsort()[-top_k:][::-1]
+    out = []
     for i in idx:
-        row = _DF.iloc[int(i)]
-        doc = row.get("Doctor","") or ""
-        words = doc.split()
-        snippet = " ".join(words[:60]) + ("…" if len(words) > 60 else "")
+        r = _ROWS[i]
         out.append({
-            "similarity": round(float(sims[int(i)]), 3),
-            "description": row.get("Description",""),
-            "patient": row.get("Patient",""),
-            "doctor_snippet": snippet
+            "condition": r.condition,
+            "symptoms": r.symptoms,
+            "advice": r.advice,
+            "url": r.url,
+            "score": round(float(sims[i]), 3),
         })
+    EVIDENCE.add("dataset", f"{len(out)} similar cases")
     return out
-
-def rag_stats() -> Dict[str, Any]:
-    _ensure_ready()
-    return {"rows": int(_DF.shape[0]), "source": _SOURCE, "features": _MAX_FEATURES}

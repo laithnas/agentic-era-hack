@@ -1,0 +1,286 @@
+# app/conversation_extras.py
+from __future__ import annotations
+import math, re, uuid
+from datetime import datetime
+from typing import Dict, Any, List, Optional, Tuple
+
+from .evidence import EVIDENCE
+
+# -------------------------------------------------------
+# 1) Mixed-input Intent Router (numbers OR natural text)
+# -------------------------------------------------------
+# Menu mapping you use in the greeting (0–7)
+_MENU_INTENTS = {
+    "0": "main_menu",
+    "1": "triage",
+    "2": "nearby",
+    "3": "costs",
+    "4": "whatif",
+    "5": "medsx",
+    "6": "book",
+    "7": "intake",
+}
+
+# Natural language patterns → the same canonical intents
+_INTENT_PATTERNS: List[Tuple[str, str]] = [
+    (r"\btriage|symptom|diagnos|what.*(wrong|might be)\b", "triage"),
+    (r"\bnearby|clinic|hospital|urgent care|doctor|find care|close to me\b", "nearby"),
+    (r"\bcost|price|how much|copay|fees?\b", "costs"),
+    (r"\bwhat if|worst case|risk|danger\b", "whatif"),
+    (r"\bmed(ication)?s?\b|\bside[- ]?effects?\b|drug\b|pharma\b", "medsx"),
+    (r"\bbook|appointment|schedule\b", "book"),
+    (r"\bform|intake|check[- ]?in\b", "intake"),
+    (r"\bmenu|start over|main menu\b", "main_menu"),
+]
+
+def route_user_input(text: str) -> dict:
+    """
+    Return {"intent": <canonical>, "matched": "...", "confidence": 0..1}
+    Prefer numeric choice 0..7. Else use regex patterns.
+    """
+    t = (text or "").strip().lower()
+    if t in _MENU_INTENTS:
+        return {"intent": _MENU_INTENTS[t], "matched": t, "confidence": 1.0}
+
+    for pat, intent in _INTENT_PATTERNS:
+        if re.search(pat, t):
+            return {"intent": intent, "matched": pat, "confidence": 0.8}
+    return {"intent": "unknown", "matched": "", "confidence": 0.0}
+
+# -------------------------------------------------------
+# 2) Adaptive Triage Flow (tiny state machine)
+# -------------------------------------------------------
+_TRIAGE_QBANK = [
+    {"key": "age_group", "q": "What’s your age group? (child, teen, adult, older adult)"},
+    {"key": "symptoms", "q": "Please describe your main symptoms in your own words."},
+    {"key": "duration", "q": "How long has this been going on? (e.g., hours, days, weeks)"},
+    {"key": "severity", "q": "How severe is it? (mild, moderate, severe)"},
+]
+
+_TRIAGE_WHY = {
+    "age_group": "Age affects risk thresholds and recommended settings for care.",
+    "symptoms": "Symptoms guide which common conditions we should consider safely.",
+    "duration": "Duration helps separate short-lived issues from those needing review.",
+    "severity": "Severity helps decide if urgent care is safer.",
+}
+
+def triage_session_start() -> dict:
+    """
+    Create a new triage session state.
+    """
+    sid = "TG-" + uuid.uuid4().hex[:8].upper()
+    return {
+        "session_id": sid,
+        "answers": {"age_group": "", "symptoms": "", "duration": "", "severity": ""},
+        "pending": [q["key"] for q in _TRIAGE_QBANK],
+        "complete": False,
+    }
+
+def triage_session_step(state: dict, user_text: str) -> dict:
+    """
+    Consume user_text to fill the next unanswered slot.
+    Returns:
+      {
+        "ask": "next question (or empty if complete)",
+        "why": "short reason",
+        "state": <updated_state>,
+        "complete": bool
+      }
+    Interrupt handling: if the user asks e.g., "book appointment", we just set a flag.
+    """
+    t = (user_text or "").strip()
+    # Lightweight interrupt routing
+    intent = route_user_input(t).get("intent")
+    if intent in {"nearby", "book", "costs", "main_menu"}:
+        state["interrupt_intent"] = intent
+        return {"ask": "", "why": "", "state": state, "complete": False}
+
+    # Next question
+    pending = state.get("pending", [])
+    if not pending:
+        state["complete"] = True
+        return {"ask": "", "why": "", "state": state, "complete": True}
+
+    key = pending[0]
+    # Save the answer
+    state["answers"][key] = t
+    pending.pop(0)
+    state["pending"] = pending
+
+    # Next question if any
+    if pending:
+        nxt = pending[0]
+        return {
+            "ask": _get_q(nxt),
+            "why": _get_why(nxt),
+            "state": state,
+            "complete": False,
+        }
+    else:
+        state["complete"] = True
+        return {"ask": "", "why": "", "state": state, "complete": True}
+
+def _get_q(key: str) -> str:
+    for q in _TRIAGE_QBANK:
+        if q["key"] == key:
+            return q["q"]
+    return ""
+
+def _get_why(key: str) -> str:
+    hint = _TRIAGE_WHY.get(key, "")
+    return f"_Why this helps:_ {hint}" if hint else ""
+
+# -------------------------------------------------------
+# 3) Evidence toggle (show/hide)
+# -------------------------------------------------------
+# In-memory flag; your agent can call set/get based on user commands.
+_SHOW_EVIDENCE = True
+
+def set_evidence_visible(value: bool) -> dict:
+    global _SHOW_EVIDENCE
+    _SHOW_EVIDENCE = bool(value)
+    return {"status": "ok", "show_evidence": _SHOW_EVIDENCE}
+
+def get_evidence_visible() -> dict:
+    return {"show_evidence": _SHOW_EVIDENCE}
+
+# -------------------------------------------------------
+# 4) Clinic UX+ (distance, open-now from Places)
+# -------------------------------------------------------
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    R = 6371.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dl / 2) ** 2
+    return round(R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)), 1)
+
+def format_place_line(item: dict, user_lat: float | None = None, user_lng: float | None = None) -> str:
+    """
+    Render a one-line clinic item with distance & open-now.
+    Requires the calling code to pass opening_hours.open_now and geometry.location if available.
+    """
+    name = item.get("name") or "Clinic"
+    rating = item.get("rating")
+    open_now = item.get("open_now")
+    address = item.get("address") or ""
+    phone = item.get("phone")
+    tel_url = item.get("tel_url")
+    website = item.get("website")
+    maps = item.get("google_url")
+
+    bits = [f"**{name}**"]
+    if rating is not None:
+        bits.append(f"★{rating}")
+    if open_now is True:
+        bits.append("(Open now)")
+    if user_lat is not None and user_lng is not None and item.get("lat") and item.get("lng"):
+        dist = haversine_km(user_lat, user_lng, item["lat"], item["lng"])
+        bits.append(f"~{dist} km")
+    if phone and tel_url:
+        bits.append(f"Call: [{phone}]({tel_url})")
+    if website:
+        bits.append(f"Website: [{website}]({website})")
+    if maps:
+        bits.append(f"[Maps]({maps})")
+    if address and not website:
+        bits.append(address)
+    return " — ".join(bits)
+
+# -------------------------------------------------------
+# 5) Medication interaction rules (tiny, high-signal)
+# -------------------------------------------------------
+# Very small, conservative rule set; extend as needed.
+_INTERACTION_RULES: List[Tuple[str, str, str]] = [
+    # (pattern A, pattern B, message)
+    (r"\b(warfarin|coumadin|anticoagulant|apixaban|rivaroxaban)\b",
+     r"\b(ibuprofen|naproxen|nsaid|aspirin)\b",
+     "Anticoagulants + NSAIDs may increase bleeding risk — discuss with a clinician."),
+    (r"\b(ssri|sertraline|fluoxetine|paroxetine|citalopram|escitalopram)\b",
+     r"\b(nsaid|ibuprofen|naproxen|aspirin)\b",
+     "SSRIs + NSAIDs may raise GI bleeding risk — use caution and seek advice."),
+    (r"\b(ace inhibitor|lisinopril|enalapril|ramipril)\b",
+     r"\b(nsaid|ibuprofen|naproxen)\b",
+     "ACE inhibitors + NSAIDs can affect kidney function — monitor and seek advice."),
+]
+
+def check_drug_interactions(names: List[str]) -> List[str]:
+    t = " ".join(names).lower()
+    alerts: List[str] = []
+    for a, b, msg in _INTERACTION_RULES:
+        if re.search(a, t) and re.search(b, t):
+            if msg not in alerts:
+                alerts.append(msg)
+    if alerts:
+        EVIDENCE.add("medsx_rules", f"interactions={alerts}")
+    return alerts
+
+# -------------------------------------------------------
+# 6) Visit-prep outputs (ICS, clinician handoff JSON)
+# -------------------------------------------------------
+def make_ics(clinic: str, dt_iso: str, title: str = "Clinic visit") -> dict:
+    """
+    Return ICS text and a suggested filename.
+    """
+    try:
+        dt = datetime.fromisoformat(dt_iso)
+    except Exception:
+        return {"status": "error", "message": "Use ISO date/time, e.g., 2025-09-16T15:30:00"}
+    dt_utc = dt.strftime("%Y%m%dT%H%M%SZ")
+    uid = uuid.uuid4().hex
+    ics = (
+        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//CareGuide//EN\n"
+        "BEGIN:VEVENT\n"
+        f"UID:{uid}\n"
+        f"DTSTAMP:{dt_utc}\n"
+        f"DTSTART:{dt_utc}\n"
+        f"SUMMARY:{title}\n"
+        f"LOCATION:{clinic}\n"
+        "END:VEVENT\nEND:VCALENDAR\n"
+    )
+    return {"status": "ok", "filename": "clinic_visit.ics", "content": ics}
+
+def clinician_handoff_summary(case: dict) -> dict:
+    """
+    Make a compact, shareable JSON (no diagnosis).
+    Input case example:
+      {
+        "age_group": "adult",
+        "symptoms": "sore throat, cough",
+        "duration": "2 days",
+        "severity": "mild",
+        "meds": ["ibuprofen"],
+        "allergies": ["penicillin"],
+        "watchouts_denied": ["trouble breathing", "chest pain"]
+      }
+    """
+    out = {
+        "type": "careguide_case",
+        "version": "1",
+        "collected_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "summary": {
+            "age_group": case.get("age_group", ""),
+            "symptoms": case.get("symptoms", ""),
+            "duration": case.get("duration", ""),
+            "severity": case.get("severity", ""),
+            "medications": case.get("meds", []),
+            "allergies": case.get("allergies", []),
+            "watchouts_denied": case.get("watchouts_denied", []),
+        },
+        "notes": "No diagnosis provided. For emergencies, seek immediate care.",
+    }
+    return out
+
+# -------------------------------------------------------
+# 7) Tone & formatting helpers
+# -------------------------------------------------------
+def tone_numbered(title: str, bullets: List[str], disclaimer: bool = True) -> str:
+    lines = []
+    if title:
+        lines.append(f"**{title}**")
+    for i, b in enumerate(bullets, 1):
+        lines.append(f"{i}) {b}")
+    if disclaimer:
+        lines.append("\nThis is general guidance, not a medical diagnosis.\n")
+        lines.append("Disclaimer: This is general guidance, not a medical diagnosis.")
+    return "\n".join(lines)
