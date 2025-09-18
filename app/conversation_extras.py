@@ -327,5 +327,5 @@ def tone_numbered(title: str, bullets: List[str], disclaimer: bool = True) -> st
         lines.append(f"**{title}**")
     for i, b in enumerate(bullets, 1):
         lines.append(f"{i}) {b}")
-    # ❌ Remove the disclaimer here, since it's already always appended in the system prompt
+    # Remove the disclaimer here, since it's already always appended in the system prompt
     return "\n".join(lines)

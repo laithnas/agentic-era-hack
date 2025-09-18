@@ -1,4 +1,52 @@
-# app/assistant_tools.py
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+assistant_tools.py
+
+Purpose
+-------
+Utility/tool functions that the agent can call to perform side-effectful or
+deterministic operations (maps lookup, cost estimation, booking confirmation,
+RAG access, “what-if” rules, medication side-effect summaries, timeline
+persistence, visit-prep helpers, etc.).
+
+Design
+------
+* Import-safe fallbacks: when optional project modules (evidence, RAG dataset,
+  triage) are not available, the file provides harmless stubs so the agent can
+  still import and run in reduced capability mode.
+* Stateless vs stateful:
+  - Most functions are stateless and return pure results for a given input.
+  - A few functions keep **session-only** state:
+      - `_LAST_LOCATION`: user’s current location (cleared per new chat)
+      - `_TIMELINE`: in-memory, string-only event log (off if zero-retention)
+* Network / APIs:
+  - Google Maps Geocoding, Places Nearby/Text Search, Place Details via REST.
+  - A tiny `TTLCache` prevents redundant HTTP calls for a short period.
+* Evidence:
+  - Functions add short breadcrumbs to `EVIDENCE` so the UI can render a
+    filtered Evidence panel (only for triage, what-if, meds).
+* Safety / Privacy:
+  - `PHI_ZERO_RETENTION` disables timeline storage.
+  - Location is stored in-memory only and can be cleared via `clear_user_location()`.
+
+Do not change function signatures lightly: the ADK "automatic function calling"
+derives JSON schemas from them. Keep parameters simple (str, int, bool, List[str],
+dict[str,str]) and avoid complex typing unions.
+"""
+
 from __future__ import annotations
 
 import os, re, time, uuid, csv, json, math
@@ -12,12 +60,15 @@ from urllib.parse import urlparse
 # Evidence logger (safe fallback if missing)
 try:
     from .evidence import EVIDENCE  # must expose .add(source, detail) and .snapshot(clear: bool)
-except Exception:  # minimal shim
+except Exception:
+    # Minimal in-process evidence recorder used if real evidence module is absent.
     class _Ev:
         _buf: List[Dict[str, str]] = []
         def add(self, source: str, detail: str) -> None:
+            """Append a small breadcrumb to the in-memory evidence buffer."""
             self._buf.append({"source": source, "detail": detail})
         def snapshot(self, clear: bool = True) -> List[Dict[str, str]]:
+            """Return current evidence list; optionally clear the buffer."""
             items = list(self._buf)
             if clear:
                 self._buf.clear()
@@ -29,8 +80,10 @@ try:
     from .rag_dataset import rag_search, rag_stats
 except Exception:
     def rag_search(q: str, top_k: int = 3) -> List[Dict[str, Any]]:
+        """Stubbed RAG search if dataset module is missing."""
         return []
     def rag_stats() -> Dict[str, int]:
+        """Stubbed RAG statistics if dataset module is missing."""
         return {"rows": 0}
 
 # Triage pipeline (used elsewhere, not called here)
@@ -70,12 +123,22 @@ MAPS_KEY = GOOGLE_MAPS_API_KEY
 # Small helpers / caching
 # ------------------------
 class TTLCache:
+    """Very small TTL-based in-process cache.
+
+    Stores up to `max_items` (key -> (timestamp, value)).
+    Evicts oldest items when capacity is exceeded. Entries older than `ttl_sec`
+    are treated as expired on read.
+
+    Note: intentionally simple; no thread-safety guarantees.
+    """
+
     def __init__(self, ttl_sec: int = 600, max_items: int = 256):
         self.ttl = ttl_sec
         self.max_items = max_items
         self.store: Dict[str, Tuple[float, Any]] = {}
 
     def get(self, k: str) -> Any | None:
+        """Return cached value if present and not expired; otherwise None."""
         self._evict()
         x = self.store.get(k)
         if not x:
@@ -87,19 +150,31 @@ class TTLCache:
         return v
 
     def set(self, k: str, v: Any) -> None:
+        """Insert/update cache entry and evict if over capacity."""
         self._evict()
         self.store[k] = (time.time(), v)
 
     def _evict(self) -> None:
+        """Trim cache to `max_items` and lazily drop oldest entries."""
         if len(self.store) <= self.max_items:
             return
         for k in sorted(self.store.keys(), key=lambda x: self.store[x][0])[: len(self.store) - self.max_items]:
             self.store.pop(k, None)
 
+# Short-lived caches for HTTP and Places results
 _HTTP_CACHE = TTLCache(ttl_sec=600)
 _PLACES_CACHE = TTLCache(ttl_sec=600)
 
 def _http_get(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """GET helper with simple memoization and error shielding.
+
+    Args:
+        url: Full endpoint URL.
+        params: Query string parameters.
+
+    Returns:
+        Parsed JSON dict on success, or {"_error": "..."} on failure.
+    """
     key = f"GET|{url}|{sorted(params.items())}"
     cached = _HTTP_CACHE.get(key)
     if cached is not None:
@@ -115,9 +190,11 @@ def _http_get(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
         return {"_error": str(e)}
 
 def _norm(s: str) -> str:
+    """Normalize free text for matching (lowercase, collapse whitespace)."""
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 def _domain(url: Optional[str]) -> Optional[str]:
+    """Extract domain (without www.) from a URL string; return None on failure."""
     if not url:
         return None
     try:
@@ -127,6 +204,7 @@ def _domain(url: Optional[str]) -> Optional[str]:
         return url
 
 def _tel_url(phone: Optional[str]) -> Optional[str]:
+    """Create a tel: URL for a human-formatted phone number (or None)."""
     if not phone:
         return None
     num = re.sub(r"[^\d+]", "", phone)
@@ -136,8 +214,13 @@ def _tel_url(phone: Optional[str]) -> Optional[str]:
 # Evidence Panel (filtered)
 # ------------------------
 def evidence_snapshot(clear: bool = True) -> dict:
-    """
-    Return an evidence panel (filtered) for triage / what-if / meds flows.
+    """Return a filtered Evidence payload for rendering in the UI.
+
+    Only items whose `source` is in `EVIDENCE_ALLOWED_SOURCES` are included.
+    If `clear=True` and there were any items, the underlying buffer is cleared.
+
+    Returns:
+        {"items": [{"source": "...", "detail": "..."} , ...]}
     """
     items = EVIDENCE.snapshot(clear=False)
     filtered = [i for i in items if (i.get("source") in EVIDENCE_ALLOWED_SOURCES)]
@@ -150,6 +233,12 @@ def evidence_snapshot(clear: bool = True) -> dict:
 # Greeting (no startup location prompt)
 # ------------------------
 def greeting() -> dict:
+    """Render the initial numbered main menu.
+
+    Notes:
+        - Per product decision, we do **not** ask for location here.
+        - We still log a greeting evidence breadcrumb for internal debugging.
+    """
     try:
         stats = rag_stats()
         kb_line = f"Scanning ~{stats.get('rows', 0):,} similar cases from our library."
@@ -168,6 +257,8 @@ def greeting() -> dict:
     lines.append("6) Book an appointment")
     lines.append("7) Fill intake form")
     lines.append("0) Main menu")
+    # Keep both lines if your UX requires; the agent prompt ensures only one line
+    # is printed at the very bottom of each assistant message.
     lines.append("\nThis is general guidance, not a medical diagnosis.\n")
     lines.append("Disclaimer: This is general guidance, not a medical diagnosis.")
 
@@ -182,7 +273,15 @@ _LAST_LOCATION: Dict[str, Any] = {
 }
 
 def set_user_location(location: str) -> dict:
-    """Normalize and save the user's location for the current session only."""
+    """Normalize and save the user's location for the current session only.
+
+    Args:
+        location: Free-text location (city/area, optionally country/zip).
+
+    Returns:
+        {"status": "ok", "saved_location": "..."} if geocoding succeeds,
+        or {"status": "error", "message": "..."} if it fails.
+    """
     if not location or not location.strip():
         return {"status": "error", "message": "Please share your city/area."}
     g = _geocode(location.strip())
@@ -197,16 +296,23 @@ def set_user_location(location: str) -> dict:
     })
     return {"status": "ok", "saved_location": _LAST_LOCATION["formatted"], "note": g.get("note", "")}
 
-
 def get_saved_location() -> dict:
-    """Return the currently saved location (if any) for this session."""
+    """Return the currently saved location (if any) for this session.
+
+    Returns:
+        {"status": "ok", ...full location dict...} if present,
+        else {"status": "none", "message": "..."}.
+    """
     if not _LAST_LOCATION.get("formatted"):
         return {"status": "none", "message": "No saved location yet."}
     return {"status": "ok", **_LAST_LOCATION}
 
-
 def clear_user_location() -> dict:
-    """Clear any saved location for a fresh session/start."""
+    """Clear any saved location for a fresh session/start.
+
+    Returns:
+        {"status": "ok", "message": "..."} after clearing.
+    """
     _LAST_LOCATION.update({
         "input": "",
         "formatted": "",
@@ -220,6 +326,11 @@ def clear_user_location() -> dict:
 # Google Maps / Places
 # ------------------------
 def _geocode(location: str) -> Dict[str, Any]:
+    """Geocode free text → {formatted, lat, lng, types}.
+
+    If no API key is configured, returns a best-effort passthrough record so
+    the flow can continue with static fallbacks.
+    """
     if not MAPS_KEY:
         return {
             "ok": True, "formatted": location.strip(), "lat": None, "lng": None, "types": [],
@@ -241,6 +352,7 @@ def _geocode(location: str) -> Dict[str, Any]:
     }
 
 def _nearby_search(lat: float, lng: float, radius_m: int) -> List[Dict[str, Any]]:
+    """Google Places Nearby Search for clinics/doctors/hospitals near (lat,lng)."""
     params = {
         "location": f"{lat},{lng}",
         "radius": radius_m,
@@ -266,6 +378,7 @@ def _nearby_search(lat: float, lng: float, radius_m: int) -> List[Dict[str, Any]
     return out
 
 def _text_search(query: str) -> List[Dict[str, Any]]:
+    """Google Places Text Search fallback (e.g., for broad city/region queries)."""
     data = _http_get("https://maps.googleapis.com/maps/api/place/textsearch/json", {"query": query, "key": MAPS_KEY})
     if data.get("_error") or data.get("status") not in ("OK", "ZERO_RESULTS"):
         return []
@@ -285,6 +398,7 @@ def _text_search(query: str) -> List[Dict[str, Any]]:
     return out
 
 def _place_details(place_id: str) -> Dict[str, Any]:
+    """Google Place Details → phone, website, canonical Google URL."""
     if not MAPS_KEY or not place_id:
         return {}
     params = {
@@ -300,8 +414,17 @@ def _place_details(place_id: str) -> Dict[str, Any]:
     return {"phone": phone, "website": r.get("website"), "google_url": r.get("url")}
 
 def find_nearby_healthcare(location: str = "", max_results: int = 3) -> List[Dict[str, Any]]:
-    """
-    Returns a list of dicts enriched with phone/website/maps links.
+    """Return a small list of nearby healthcare options enriched with links.
+
+    Behavior:
+      1) If `location` is provided, it is geocoded and saved to session.
+      2) If lat/lng are known, run Nearby Search with expanding radius.
+      3) Else fall back to Text Search: "clinic OR urgent care OR hospital in {place}".
+      4) If no API key, return static placeholders (still functional UX).
+
+    Returns:
+        List of dicts: name, address, rating, phone, tel_url, website, website_domain,
+        google_url, open_now, lat, lng.
     """
     if location and location.strip():
         set_user_location(location)
@@ -362,6 +485,7 @@ def find_nearby_healthcare(location: str = "", max_results: int = 3) -> List[Dic
 # ------------------------
 # Costs & Booking
 # ------------------------
+# Simple, non-binding reference ranges only.
 _COST_TABLE = {
     "clinic_visit": {"insured": "USD 20–80 copay", "self_pay": "USD 80–250"},
     "flu_test": {"insured": "USD 0–40", "self_pay": "USD 20–120"},
@@ -370,6 +494,21 @@ _COST_TABLE = {
 }
 
 def estimate_cost(has_insurance: bool, suspected: str = "") -> dict:
+    """Return a coarse cost snapshot for common clinic/urgent-care scenarios.
+
+    Args:
+        has_insurance: True if the user has medical insurance.
+        suspected: Free text; keywords (“flu”, “strep”, “sore throat”, “severe”, “chest pain”)
+                   will influence items and venue suggestion.
+
+    Returns:
+        {
+          "insurance": "insured"|"self_pay",
+          "suggested_venue": "clinic"|"urgent care",
+          "venue_typical": "USD ...",
+          "items": [{"item": "clinic visit", "typical": "USD ..."}, ...]
+        }
+    """
     plan = "insured" if has_insurance else "self_pay"
     items = ["clinic_visit"]
     s = (suspected or "").lower()
@@ -383,6 +522,16 @@ def estimate_cost(has_insurance: bool, suspected: str = "") -> dict:
     return {"insurance": plan, "suggested_venue": venue, "venue_typical": venue_hint, "items": est}
 
 def book_appointment(clinic_name: str, datetime_iso: str, reason: str = "") -> str:
+    """Return a synthetic confirmation string for a “booked” appointment.
+
+    Args:
+        clinic_name: Clinic/office name (free text).
+        datetime_iso: ISO-8601 local date/time string, e.g. "2025-09-16T15:30:00".
+        reason: Optional short reason for visit.
+
+    Returns:
+        Confirmation text (including a short ID) or guidance to fix the date format.
+    """
     try:
         _ = datetime.fromisoformat(datetime_iso)
     except Exception:
@@ -394,8 +543,14 @@ def book_appointment(clinic_name: str, datetime_iso: str, reason: str = "") -> s
 # RAG wrapper (for Evidence panel)
 # ------------------------
 def rag_search_tool(query: str, top_k: int = 3) -> List[Dict[str, Any]]:
-    """
-    Retrieve top-k similar cases from the dataset.
+    """Thin wrapper around `rag_search` that records evidence breadcrumbs.
+
+    Args:
+        query: Free text (symptoms or description).
+        top_k: How many similar cases to retrieve.
+
+    Returns:
+        List of top matches (shape determined by your RAG pipeline).
     """
     try:
         results = rag_search(query, top_k=top_k)
@@ -411,15 +566,23 @@ def rag_search_tool(query: str, top_k: int = 3) -> List[Dict[str, Any]]:
 # What-If safety check (simple, explainable)
 # ------------------------
 def what_if_check(question_text: str) -> dict:
-    """
-    Returns risk band + reasons + actions based on conservative rules.
+    """Return a conservative risk band + short reasons + suggested actions.
+
+    This function intentionally implements transparent, high-signal rules,
+    not a diagnostic model.
+
+    Args:
+        question_text: User-provided “what if … ?” scenario.
+
+    Returns:
+        {"risk": "low|moderate|high", "reasons": [...], "actions": [...]}
     """
     t = _norm(question_text)
     risk = "low"
     reasons: List[str] = []
     actions: List[str] = ["Monitor symptoms", "Hydrate and rest", "Seek care if symptoms worsen"]
 
-    # Very simple illustrative rules (add more as needed)
+    # Very simple illustrative rules (extend carefully)
     if re.search(r"\b39(\.|,)?\s?c|102(\.|,)?\s?f|high fever\b", t):
         risk = "moderate"; reasons.append("High fever can signal infection.")
         actions.insert(0, "Consider clinic evaluation within 24–48h")
@@ -436,7 +599,13 @@ def what_if_check(question_text: str) -> dict:
 _MEDS_DB: Optional[Dict[str, Dict[str, Any]]] = None
 
 def _load_meds_db() -> None:
-    """Load meds CSV if provided; else use a tiny built-in map."""
+    """Load a medications database from CSV (if provided) or a tiny built-in map.
+
+    Environment:
+        MEDS_DATA_CSV: optional path to a CSV with columns:
+            name, common_side_effects, serious_side_effects, interactions
+        Side-effect lists are '|' (pipe) separated in the CSV.
+    """
     global _MEDS_DB
     if _MEDS_DB is not None:
         return
@@ -482,9 +651,14 @@ def _load_meds_db() -> None:
         }
 
 def _normalize_meds_list(inp) -> List[str]:
-    """
-    Accepts list[str] or a comma/newline/semicolon separated string.
-    Returns a de-duplicated, normalized list of medication names.
+    """Normalize and deduplicate medication names.
+
+    Accepts either a list[str] or a single string with comma/newline/semicolon
+    separators. Lowercases, trims, and applies a tiny canonicalization (e.g.,
+    acetaminophen → paracetamol).
+
+    Returns:
+        List of canonicalized med names (lowercase).
     """
     if isinstance(inp, list):
         parts = inp
@@ -495,11 +669,11 @@ def _normalize_meds_list(inp) -> List[str]:
         n = _norm(p)
         if not n:
             continue
-        # example canonicalization
+        # Example canonicalization
         if n == "acetaminophen":
             n = "paracetamol"
         meds.append(n)
-    # de-duplicate
+    # De-duplicate while preserving order
     seen = set()
     out: List[str] = []
     for m in meds:
@@ -509,19 +683,28 @@ def _normalize_meds_list(inp) -> List[str]:
     return out
 
 def meds_side_effects_check(meds: List[str], file_text: str = "") -> dict:
-    """
-    Multi-med side-effect checker with simple interaction merging.
+    """Merge side-effects and interactions for one or more medications.
 
-    Parameters
-    ----------
-    meds : List[str]             # e.g., ["ibuprofen", "amoxicillin"]
-    file_text : str              # optional extra text (OCR'd Rx)
+    Args:
+        meds: List of medication names (e.g., ["ibuprofen", "amoxicillin"]).
+        file_text: Optional extra text where additional med names might appear
+                   (e.g., extracted from a prescription file by another tool).
+
+    Returns:
+        {
+          "medications": [...],
+          "common_side_effects": [... up to 12],
+          "serious_side_effects": [... up to 12],
+          "possible_interactions": [... up to 12],
+          "details": [{"drug":..., "found": bool, "source": "csv|builtin"?, ...}]
+        }
     """
     _load_meds_db()
     assert _MEDS_DB is not None
 
     all_names = _normalize_meds_list(meds)
     if file_text:
+        # Optionally merge any meds found in `file_text`
         all_names.extend(_normalize_meds_list(file_text))
         all_names = _normalize_meds_list(all_names)
 
@@ -559,8 +742,10 @@ def meds_side_effects_check(meds: List[str], file_text: str = "") -> dict:
     }
 
 def meds_side_effects_check_text(meds_text: str, file_text: str = "") -> dict:
-    """
-    Convenience wrapper if the model/UI prefers a single string like "ibuprofen, amoxicillin".
+    """String-friendly wrapper around `meds_side_effects_check`.
+
+    Accepts a single string such as "ibuprofen, amoxicillin" and delegates to
+    the list-based function. Useful when the LLM or UI prefers free text.
     """
     return meds_side_effects_check(_normalize_meds_list(meds_text), file_text=file_text)
 
@@ -570,8 +755,18 @@ def meds_side_effects_check_text(meds_text: str, file_text: str = "") -> dict:
 _TIMELINE: List[Dict[str, str]] = []
 
 def save_timeline(kind: str, details: Dict[str, str] | None = None) -> dict:
-    """
-    Save a lightweight timeline event (string-only details).
+    """Append a lightweight timeline event (string-only details).
+
+    Privacy:
+        If `PHI_ZERO_RETENTION` is True, the function is a no-op.
+
+    Args:
+        kind: Short label, e.g., "triage", "appointment", "intake".
+        details: Optional small mapping of string→string.
+
+    Returns:
+        {"status": "ok", "event": {...}} on success,
+        or {"status": "disabled", ...} if zero-retention is enabled.
     """
     if PHI_ZERO_RETENTION:
         return {"status": "disabled", "message": "Zero-retention is enabled; timeline is off."}
@@ -590,11 +785,13 @@ def save_timeline(kind: str, details: Dict[str, str] | None = None) -> dict:
     return {"status": "ok", "event": evt}
 
 def timeline_list() -> List[Dict[str, str]]:
+    """Return most recent-first timeline entries (empty if zero-retention)."""
     if PHI_ZERO_RETENTION:
         return []
     return list(_TIMELINE)
 
 def timeline_clear() -> dict:
+    """Clear all timeline entries (no-op if zero-retention)."""
     if PHI_ZERO_RETENTION:
         return {"status": "disabled", "message": "Zero-retention is enabled; nothing stored."}
     _TIMELINE.clear()
@@ -611,8 +808,18 @@ def visit_prep_summary(
     allergies: List[str] | None = None,
     denied_red_flags: List[str] | None = None
 ) -> dict:
-    """
-    Produce a concise, shareable visit-prep summary (no diagnosis).
+    """Produce a concise, shareable visit-prep summary (no diagnosis).
+
+    Args:
+        symptoms: Main symptoms in free text.
+        duration: How long the symptoms have been present.
+        severity: User-reported severity (mild|moderate|severe).
+        meds: Optional current medications.
+        allergies: Optional known allergies.
+        denied_red_flags: Optional list of denied emergent symptoms (e.g., “no chest pain”).
+
+    Returns:
+        Dict with a simple summary block and a safety note.
     """
     out = {
         "summary": {

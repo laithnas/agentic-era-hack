@@ -14,6 +14,20 @@
 # Copyright 2025 Google LLC
 # Licensed under the Apache License, Version 2.0
 
+"""Agent bootstrap for CareGuide.
+
+This module wires together:
+- The system prompt that governs CareGuide's behavior
+- All callable tools (triage, maps/places, costs, booking, evidence, meds, etc.)
+- Runtime backend selection for Gemini API vs. Vertex AI (ADC)
+- The root ADK `Agent` instance exported as `root_agent`
+
+Guiding principles:
+- **Safety-first**: emergency/chronic guardrails and a single standardized disclaimer
+- **Menu-driven UX**: numbered choices with a persistent “0) Main menu”
+- **Tool-first**: the LLM should prefer tools over guesswork where available
+"""
+
 import os
 from typing import Optional
 
@@ -22,7 +36,6 @@ from .triage import triage_pipeline
 from .safety_guard import set_safety_level, get_safety_level, safety_gate
 from .triage_kb_admin import kb_reload, set_profile, get_profile
 from .handoff import set_handoff_destination, request_live_handoff
-
 
 # --- Assistant tools (maps, costs, booking, RAG, evidence, meds, what-if, timeline, visit-prep) ---
 from .assistant_tools import (
@@ -48,16 +61,19 @@ from .risk_sim import risk_simulate
 from .timeline_ai import timeline_insights
 from .i18n import set_language, get_language, phrase
 from .evidence_render import evidence_markdown
-from .lab_ocr import analyze_lab_text
 
 # --- Conversation extras (routing, adaptive triage, evidence toggle, clinic formatting, interactions, ICS/handoff, tone) ---
 from .conversation_extras import (
     route_user_input,
-    triage_session_start, triage_session_step,
-    set_evidence_visible, get_evidence_visible,
-    haversine_km, format_place_line,   # optional helpers the model can call
+    triage_session_start,
+    triage_session_step,
+    set_evidence_visible,
+    get_evidence_visible,
+    haversine_km,
+    format_place_line,   # optional helpers the model can call
     check_drug_interactions,
-    make_ics, clinician_handoff_summary,
+    make_ics,
+    clinician_handoff_summary,
     tone_numbered,
 )
 
@@ -67,6 +83,14 @@ from google.adk.agents import Agent
 
 # ---------- LLM backend selection ----------
 def _get_adc_project() -> Optional[str]:
+    """Return the active Google Cloud project from Application Default Credentials (ADC).
+
+    Attempts to load ADC and extract the project ID so we can target Vertex AI.
+    If ADC is not configured or fails to resolve a project, returns ``None``.
+
+    Returns:
+        Optional[str]: The resolved Google Cloud project ID, or ``None`` if unavailable.
+    """
     try:
         import google.auth
         creds, project_id = google.auth.default()
@@ -74,24 +98,42 @@ def _get_adc_project() -> Optional[str]:
     except Exception:
         return None
 
-def _configure_llm_backend():
-    """
-    Decide whether to use Vertex AI (ADC + project) or Gemini API (API key).
+
+def _configure_llm_backend() -> None:
+    """Select and configure the LLM backend (Gemini API vs. Vertex AI).
+
     Priority:
-      1) If GOOGLE_API_KEY or GOOGLE_GENAI_API_KEY present -> Gemini API
-      2) Else if ADC yields a project -> Vertex AI
-      3) Else -> raise clear error explaining how to fix
+        1) If an API key exists in ``GOOGLE_API_KEY`` or ``GOOGLE_GENAI_API_KEY``:
+           - Use **Gemini API** (sets ``GOOGLE_GENAI_USE_VERTEXAI=False``).
+        2) Else if ADC returns a project:
+           - Use **Vertex AI** (sets ``GOOGLE_CLOUD_PROJECT`` and a valid region,
+             and ``GOOGLE_GENAI_USE_VERTEXAI=True``).
+        3) Else:
+           - Raise a clear error with remediation steps.
+
+    Environment variables set (when needed):
+        - GOOGLE_GENAI_USE_VERTEXAI
+        - GOOGLE_CLOUD_PROJECT
+        - GOOGLE_CLOUD_LOCATION
+
+    Raises:
+        RuntimeError: If neither an API key nor ADC project is available.
     """
     api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_GENAI_API_KEY")
     if api_key:
+        # Force Gemini API backend: no project/region required.
         os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "False"
         return
+
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT") or _get_adc_project()
     if project_id:
+        # Configure Vertex AI backend with a concrete region.
         os.environ.setdefault("GOOGLE_CLOUD_PROJECT", project_id)
         os.environ.setdefault("GOOGLE_CLOUD_LOCATION", "us-central1")
         os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
         return
+
+    # Neither path is configured—fail fast with actionable guidance.
     raise RuntimeError(
         "No credentials configured for the LLM.\n"
         "Fix one of these:\n"
@@ -102,6 +144,8 @@ def _configure_llm_backend():
         "        gcloud config set project YOUR_PROJECT_ID\n"
     )
 
+
+# Initialize backend and default dataset location used by RAG utilities.
 _configure_llm_backend()
 os.environ.setdefault("TRIAGE_KB_GCS", "gs://lohealthcare/ai-medical-chatbot.csv")
 
@@ -212,6 +256,7 @@ STYLE & UX
 # Choose a model that works for both Gemini API and Vertex AI backends.
 MODEL_NAME = os.getenv("TRIAGE_MODEL", "gemini-2.5-flash")
 
+# The single exported agent instance ADK will import.
 root_agent = Agent(
     name="triage_agent",
     model=MODEL_NAME,
@@ -256,29 +301,33 @@ root_agent = Agent(
         triage_session_step,
         set_evidence_visible,
         get_evidence_visible,
+
         # Optional formatting helpers (available to the model if it wants)
         tone_numbered,
         haversine_km,
         format_place_line,
-        set_care_mode, 
-        get_care_mode, 
-        sentiment_screen, 
+
+        # Tone/sentiment & safety/handoff controls
+        set_care_mode,
+        get_care_mode,
+        sentiment_screen,
         tone_enforce,
-        set_safety_level, 
-        get_safety_level, 
+        set_safety_level,
+        get_safety_level,
         safety_gate,
-        kb_reload, 
-        set_profile, 
+        kb_reload,
+        set_profile,
         get_profile,
-        set_handoff_destination, 
+        set_handoff_destination,
         request_live_handoff,
+
+        # Extras (parsers, simulations, i18n, evidence)
         extract_meds_from_text,
         risk_simulate,
         timeline_insights,
-        set_language, 
-        get_language, 
+        set_language,
+        get_language,
         phrase,
         evidence_markdown,
-        analyze_lab_text,
     ],
 )
