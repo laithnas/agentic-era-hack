@@ -257,9 +257,6 @@ def check_drug_interactions(names: List[str]) -> List[str]:
 # 6) Visit-prep outputs (ICS, clinician handoff JSON)
 # -------------------------------------------------------
 def make_ics(clinic: str, dt_iso: str, title: str = "Clinic visit") -> dict:
-    """
-    Return ICS text and a suggested filename.
-    """
     try:
         dt = datetime.fromisoformat(dt_iso)
     except Exception:
@@ -276,7 +273,19 @@ def make_ics(clinic: str, dt_iso: str, title: str = "Clinic visit") -> dict:
         f"LOCATION:{clinic}\n"
         "END:VEVENT\nEND:VCALENDAR\n"
     )
-    return {"status": "ok", "filename": "clinic_visit.ics", "content": ics}
+
+    # Create a downloadable link
+    import base64, urllib.parse
+    encoded = urllib.parse.quote(ics)
+    download_url = f"data:text/calendar;charset=utf-8,{encoded}"
+
+    return {
+        "status": "ok",
+        "filename": "clinic_visit.ics",
+        "content": ics,
+        "download_url": download_url
+    }
+
 
 def clinician_handoff_summary(case: dict) -> dict:
     """
@@ -318,7 +327,5 @@ def tone_numbered(title: str, bullets: List[str], disclaimer: bool = True) -> st
         lines.append(f"**{title}**")
     for i, b in enumerate(bullets, 1):
         lines.append(f"{i}) {b}")
-    if disclaimer:
-        lines.append("\nThis is general guidance, not a medical diagnosis.\n")
-        lines.append("Disclaimer: This is general guidance, not a medical diagnosis.")
+    # ❌ Remove the disclaimer here, since it's already always appended in the system prompt
     return "\n".join(lines)

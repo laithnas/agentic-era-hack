@@ -36,7 +36,11 @@ from .assistant_tools import (
     timeline_list,
     timeline_clear,
     visit_prep_summary,
+    clear_user_location
 )
+
+
+
 
 # --- Conversation extras (routing, adaptive triage, evidence toggle, clinic formatting, interactions, ICS/handoff, tone) ---
 from .conversation_extras import (
@@ -208,6 +212,7 @@ root_agent = Agent(
     instruction=TRIAGE_SYSTEM_PROMPT,
     tools=[
         # Greeting & evidence
+        clear_user_location, 
         greeting,
         evidence_snapshot,
 

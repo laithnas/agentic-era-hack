@@ -182,6 +182,7 @@ _LAST_LOCATION: Dict[str, Any] = {
 }
 
 def set_user_location(location: str) -> dict:
+    """Normalize and save the user's location for the current session only."""
     if not location or not location.strip():
         return {"status": "error", "message": "Please share your city/area."}
     g = _geocode(location.strip())
@@ -192,14 +193,28 @@ def set_user_location(location: str) -> dict:
         "formatted": g["formatted"],
         "lat": g.get("lat"),
         "lng": g.get("lng"),
-        "types": g.get("types", [])
+        "types": g.get("types", []),
     })
-    return {"status": "ok", "saved_location": _LAST_LOCATION["formatted"], "note": g.get("note","")}
+    return {"status": "ok", "saved_location": _LAST_LOCATION["formatted"], "note": g.get("note", "")}
+
 
 def get_saved_location() -> dict:
+    """Return the currently saved location (if any) for this session."""
     if not _LAST_LOCATION.get("formatted"):
         return {"status": "none", "message": "No saved location yet."}
     return {"status": "ok", **_LAST_LOCATION}
+
+
+def clear_location() -> dict:
+    """Clear any saved location for a fresh session/start."""
+    _LAST_LOCATION.update({
+        "input": "",
+        "formatted": "",
+        "lat": None,
+        "lng": None,
+        "types": [],
+    })
+    return {"status": "ok", "message": "Location cleared for this session."}
 
 # ------------------------
 # Google Maps / Places
