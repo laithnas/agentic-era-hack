@@ -2,7 +2,7 @@
 from __future__ import annotations
 import math, re, uuid
 from datetime import datetime
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Tuple  # keep simple types; avoid Optional/Union in tool signatures
 
 from .evidence import EVIDENCE
 
@@ -148,6 +148,10 @@ def get_evidence_visible() -> dict:
 # 4) Clinic UX+ (distance, open-now from Places)
 # -------------------------------------------------------
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """
+    Compute great-circle distance between two points in kilometers.
+    Signatures are simple floats to satisfy ADK's auto function schema.
+    """
     R = 6371.0
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
@@ -155,36 +159,70 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dl / 2) ** 2
     return round(R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)), 1)
 
-def format_place_line(item: dict, user_lat: float | None = None, user_lng: float | None = None) -> str:
+def format_place_line(
+    name: str,
+    address: str = "",
+    rating: float = -1.0,
+    phone: str = "",
+    tel_url: str = "",
+    website: str = "",
+    google_url: str = "",
+    open_now: bool = False,
+    lat: float = -1.0,
+    lng: float = -1.0,
+    user_lat: float = -1.0,
+    user_lng: float = -1.0
+) -> str:
     """
-    Render a one-line clinic item with distance & open-now.
-    Requires the calling code to pass opening_hours.open_now and geometry.location if available.
-    """
-    name = item.get("name") or "Clinic"
-    rating = item.get("rating")
-    open_now = item.get("open_now")
-    address = item.get("address") or ""
-    phone = item.get("phone")
-    tel_url = item.get("tel_url")
-    website = item.get("website")
-    maps = item.get("google_url")
+    Return a single-line, user-facing string for a clinic row.
 
-    bits = [f"**{name}**"]
-    if rating is not None:
-        bits.append(f"★{rating}")
-    if open_now is True:
+    IMPORTANT: No Optional/Union in the signature. We use sentinel defaults:
+      - rating < 0   => hide rating
+      - user_lat/user_lng < 0 or lat/lng < 0 => omit distance
+      - empty strings for phone/tel_url/website/google_url/address => hide those parts
+    """
+    bits: List[str] = []
+
+    # Name
+    nm = name or "Clinic"
+    bits.append(f"**{nm}**")
+
+    # Rating
+    if rating >= 0:
+        bits.append(f"★{rating:.1f}")
+    else:
+        bits.append("★N/A")
+
+    # Open now
+    if open_now:
         bits.append("(Open now)")
-    if user_lat is not None and user_lng is not None and item.get("lat") and item.get("lng"):
-        dist = haversine_km(user_lat, user_lng, item["lat"], item["lng"])
+
+    # Distance (only if both user and place coords provided)
+    if (user_lat >= 0 and user_lng >= 0 and lat >= 0 and lng >= 0):
+        dist = haversine_km(user_lat, user_lng, lat, lng)
         bits.append(f"~{dist} km")
+
+    # Phone (clickable tel:)
     if phone and tel_url:
         bits.append(f"Call: [{phone}]({tel_url})")
+
+    # Website
     if website:
-        bits.append(f"Website: [{website}]({website})")
-    if maps:
-        bits.append(f"[Maps]({maps})")
+        from urllib.parse import urlparse
+        try:
+            dom = urlparse(website).netloc.replace("www.", "")
+        except Exception:
+            dom = website
+        bits.append(f"Website: [{dom}]({website})")
+
+    # Google Maps
+    if google_url:
+        bits.append(f"[Maps]({google_url})")
+
+    # Address (if website not present, still show address to give context)
     if address and not website:
         bits.append(address)
+
     return " — ".join(bits)
 
 # -------------------------------------------------------
