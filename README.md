@@ -3,7 +3,7 @@
 A base **ReAct Agent** built with Google’s **Agent Development Kit (ADK)**.  
 Generated with [`googleCloudPlatform/agent-starter-pack`](https://github.com/GoogleCloudPlatform/agent-starter-pack) version `0.14.1`.
 
-CareGuide is an **AI-powered medical assistant** that helps users triage symptoms, find nearby healthcare facilities, estimate costs, check medication safety, and prepare for medical visits — all within strict safety guardrails.
+CareGuide is an **AI-powered medical assistant** that helps users triage symptoms, find nearby healthcare facilities, estimate costs, check medication safety, and prepare for medical visits, all within strict safety guardrails.
 
 ⚠️ **Disclaimer**: This project does not diagnose, prescribe, or replace professional medical advice. All responses are for **general guidance only**.
 
