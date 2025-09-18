@@ -36,11 +36,8 @@ from .assistant_tools import (
     timeline_list,
     timeline_clear,
     visit_prep_summary,
-    clear_user_location
+    clear_user_location,
 )
-
-
-
 
 # --- Conversation extras (routing, adaptive triage, evidence toggle, clinic formatting, interactions, ICS/handoff, tone) ---
 from .conversation_extras import (
@@ -107,10 +104,9 @@ SCOPE & SAFETY
 - Do NOT diagnose, prescribe, or give dosages. Use hedged language (“may be”, “could be”).
 - If severe/emergency symptoms are present, immediately advise urgent/emergency care and stop.
 - If issues are chronic/complex or out of scope, offer to connect with a clinician and stop.
-- Always end with the two-line disclaimer:
-  This is general guidance, not a medical diagnosis.
-
-  Disclaimer: This is general guidance, not a medical diagnosis.
+- End every assistant message with exactly this ONE line at the very bottom:
+  \nDisclaimer: This is general guidance, not a medical diagnosis.
+  Do not include any other disclaimer lines.
 
 MENUS & INPUT
 - Present **numbered options** (1,2,3,…) and always include **“0) Main menu”**.
@@ -122,7 +118,7 @@ LOCATION POLICY
 - Only ask for city/area when the user chooses **Nearby care (2)**, **Book appointment (6)**, **Fill intake form (7)**, or **after triage** if they choose to find/book care.
 
 START (GREETING)
-- On any greeting/first turn, call `greeting()` and show its **numbered** menu with “0) Main menu”.
+- On the **first** turn of a new conversation, call `clear_user_location()` and then call `greeting()` to show the numbered menu with “0) Main menu”.
 - Do not ask for location here.
 
 EVIDENCE PANEL (visibility & scope)
@@ -198,8 +194,7 @@ VISIT-PREP PACKAGE (anytime after triage/meds/booking)
 
 STYLE & UX
 - Friendly, concise, numbered options. Mirror back key facts briefly before advice.
-- One question at a time during triage, followed by `_Why this helps:_ ...` line supplied by the tool.
-- Keep the final two-line disclaimer exactly as written at the bottom of **every** assistant message.
+- One question at a time during triage, followed by `_Why this helps:_ ...` line supplied by the tool.\n\n
 """
 )
 
@@ -211,8 +206,10 @@ root_agent = Agent(
     model=MODEL_NAME,
     instruction=TRIAGE_SYSTEM_PROMPT,
     tools=[
+        # Reset per-session location at the start of a new chat
+        clear_user_location,
+
         # Greeting & evidence
-        clear_user_location, 
         greeting,
         evidence_snapshot,
 
